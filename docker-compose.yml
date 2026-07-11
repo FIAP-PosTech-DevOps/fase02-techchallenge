@@ -1,0 +1,223 @@
+version: "3.9"
+
+# ==============================================================================
+# ToggleMaster - Ambiente Local (Fase 2)
+# 5 microsserviços + 4 bancos de dados locais (2x Postgres, 1x Redis, 1x DynamoDB Local)
+#
+# ATENÇÃO (leia antes de rodar):
+# - O analytics-service e o evaluation-service usam boto3 / aws-sdk-go SEM
+#   endpoint_url customizado no código. Isso significa que, mesmo com o
+#   dynamodb-local rodando aqui, o cliente boto3 do analytics-service vai
+#   tentar falar com a AWS real, a menos que você aplique um pequeno patch
+#   no app.py adicionando endpoint_url=os.getenv("AWS_ENDPOINT_URL") no
+#   client SQS/DynamoDB. Deixei o dynamodb-local no compose para satisfazer
+#   o requisito de infraestrutura local, mas documente essa limitação
+#   conhecida no relatório se não patchear o código.
+# - O SQS não tem versão local no requisito da Fase 2 (só pede DynamoDB
+#   Local) — então AWS_SQS_URL precisa apontar para uma fila SQS real da
+#   AWS Academy mesmo rodando localmente. Preencha AWS_ACCESS_KEY_ID /
+#   AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN no arquivo .env raiz.
+# ==============================================================================
+
+services:
+
+  # --- Bancos de dados locais ---
+
+  auth-db:
+    image: postgres:16-alpine
+    container_name: auth-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: toggle
+      POSTGRES_PASSWORD: toggle
+      POSTGRES_DB: auth_db
+    volumes:
+      - ./auth-service/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - auth-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U toggle -d auth_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - toggle-net
+
+  flags-db:
+    image: postgres:16-alpine
+    container_name: flags-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: toggle
+      POSTGRES_PASSWORD: toggle
+      POSTGRES_DB: flags_db
+    volumes:
+      - ./flag-service/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - flags-db-data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U toggle -d flags_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - toggle-net
+
+  targeting-db:
+    image: postgres:16-alpine
+    container_name: targeting-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: toggle
+      POSTGRES_PASSWORD: toggle
+      POSTGRES_DB: targeting_db
+    volumes:
+      - ./targeting-service/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - targeting-db-data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U toggle -d targeting_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - toggle-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - toggle-net
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: dynamodb-local
+    restart: unless-stopped
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      - "8000:8000"
+    networks:
+      - toggle-net
+
+  # --- Microsserviços ---
+
+  auth-service:
+    build: ./auth-service
+    container_name: auth-service
+    restart: unless-stopped
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://toggle:toggle@auth-db:5432/auth_db?sslmode=disable"
+      PORT: "8001"
+      MASTER_KEY: "${MASTER_KEY:-admin-secreto-123}"
+    ports:
+      - "8001:8001"
+    networks:
+      - toggle-net
+
+  flag-service:
+    build: ./flag-service
+    container_name: flag-service
+    restart: unless-stopped
+    depends_on:
+      flags-db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    environment:
+      DATABASE_URL: "postgres://toggle:toggle@flags-db:5432/flags_db?sslmode=disable"
+      PORT: "8002"
+      AUTH_SERVICE_URL: "http://auth-service:8001"
+    ports:
+      - "8002:8002"
+    networks:
+      - toggle-net
+
+  targeting-service:
+    build: ./targeting-service
+    container_name: targeting-service
+    restart: unless-stopped
+    depends_on:
+      targeting-db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    environment:
+      DATABASE_URL: "postgres://toggle:toggle@targeting-db:5432/targeting_db?sslmode=disable"
+      PORT: "8003"
+      AUTH_SERVICE_URL: "http://auth-service:8001"
+    ports:
+      - "8003:8003"
+    networks:
+      - toggle-net
+
+  evaluation-service:
+    build: ./evaluation-service
+    container_name: evaluation-service
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      flag-service:
+        condition: service_started
+      targeting-service:
+        condition: service_started
+    environment:
+      PORT: "8004"
+      REDIS_URL: "redis://redis:6379"
+      FLAG_SERVICE_URL: "http://flag-service:8002"
+      TARGETING_SERVICE_URL: "http://targeting-service:8003"
+      SERVICE_API_KEY: "${SERVICE_API_KEY:-}"
+      # Opcional localmente: se não definido, o serviço apenas loga
+      # [SQS_DISABLED] e segue funcionando (ver evaluation-service/sqs.go).
+      AWS_SQS_URL: "${AWS_SQS_URL:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+    ports:
+      - "8004:8004"
+    networks:
+      - toggle-net
+
+  analytics-service:
+    build: ./analytics-service
+    container_name: analytics-service
+    restart: unless-stopped
+    depends_on:
+      - dynamodb-local
+    environment:
+      PORT: "8005"
+      # Obrigatórios no código (o serviço sai com exit(1) se faltar algum).
+      AWS_SQS_URL: "${AWS_SQS_URL:?defina AWS_SQS_URL no .env - fila real da AWS Academy}"
+      AWS_DYNAMODB_TABLE: "${AWS_DYNAMODB_TABLE:-ToggleMasterAnalytics}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:?defina no .env}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:?defina no .env}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+    ports:
+      - "8005:8005"
+    networks:
+      - toggle-net
+
+networks:
+  toggle-net:
+    driver: bridge
+
+volumes:
+  auth-db-data:
+  flags-db-data:
+  targeting-db-data:

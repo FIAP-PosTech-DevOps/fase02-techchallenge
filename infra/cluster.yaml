@@ -1,0 +1,39 @@
+# infra/cluster.yaml
+#
+# Cria o cluster EKS via eksctl, mas SEM deixar o eksctl criar roles IAM novas.
+# Isso é o que torna isso compatível com AWS Academy: apontamos explicitamente
+# para a LabRole existente tanto no cluster quanto no node group.
+#
+# Uso:
+#   1. Descubra o ARN da LabRole no console AWS > IAM > Roles > LabRole
+#      (ou: aws iam get-role --role-name LabRole --query 'Role.Arn' --output text)
+#   2. Substitua SEU_ARN_LABROLE_AQUI abaixo (nas duas ocorrências)
+#   3. eksctl create cluster -f infra/cluster.yaml
+#
+# Qualquer pessoa do grupo roda o MESMO comando e chega no MESMO cluster.
+# Isso substitui as ~15 telas do console por 1 arquivo versionado no Git.
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: togglemaster-cluster
+  region: us-east-1
+  version: "1.29"
+
+# --- Cluster usa a LabRole existente (não cria role nova) ---
+iam:
+  serviceRoleARN: "SEU_ARN_LABROLE_AQUI"
+
+managedNodeGroups:
+  - name: togglemaster-nodes
+    instanceType: t3.medium
+    minSize: 1
+    desiredCapacity: 2
+    maxSize: 4
+    # --- Node group também usa a LabRole existente ---
+    iam:
+      instanceRoleARN: "SEU_ARN_LABROLE_AQUI"
+    # eksctl por padrão tentaria criar uma role de node nova;
+    # ao fornecer instanceRoleARN, ele reaproveita a LabRole e não
+    # tenta criar/anexar policies novas (que a Academy bloquearia).

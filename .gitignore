@@ -1,0 +1,18 @@
+# --- Segredos ---
+.env
+
+# --- Go ---
+*.exe
+*.test
+/auth-service/auth-service
+/evaluation-service/evaluation-service
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- Docker/SO ---
+.DS_Store
+*.log
